@@ -188,28 +188,44 @@ fun CameraPreviewScreen() {
                     val result = handLandmarker.detect(mpImage)
 
                     if (result.landmarks().isNotEmpty()) {
-                        handStatus = "Hand detected"
+                        handStatus = "Hand detected: "
 
                         var selectedHandIndex = 0
+                        var selectedHandLabel = "Unknown"
 
                         val handednessList = result.handednesses()
+
                         for (i in handednessList.indices) {
                             val categoryList = handednessList[i]
                             if (categoryList.isNotEmpty()) {
                                 val label = categoryList[0].categoryName()
                                 if (label.equals("Right", ignoreCase = true)) {
                                     selectedHandIndex = i
+                                    selectedHandLabel = label
                                     break
                                 }
                             }
                         }
 
+                        if (selectedHandLabel == "Unknown" && handednessList.isNotEmpty()) {
+                            val firstCategoryList = handednessList[selectedHandIndex]
+                            if (firstCategoryList.isNotEmpty()) {
+                                selectedHandLabel = firstCategoryList[0].categoryName()
+                            }
+                        }
+
                         val firstHand = result.landmarks()[selectedHandIndex]
+                        handStatus = "Hand detected: $selectedHandLabel"
 
                         if (!isLandmarksValidLetter(firstHand)) {
                             predictionText = "Prediction: invalid hand shape"
                         } else {
-                            val normalized = normalizeLandmarksLetter(firstHand)
+                            var normalized = normalizeLandmarksLetter(firstHand)
+
+                            if (selectedHandLabel.equals("Left", ignoreCase = true)) {
+                                normalized = mirrorNormalizedX(normalized)
+                            }
+
                             val inputBuffer = floatArrayToInputBuffer(normalized)
 
                             val output = Array(1) { FloatArray(labels.size) }
@@ -407,6 +423,18 @@ private fun loadModelFile(context: android.content.Context, fileName: String): B
     val startOffset = fileDescriptor.startOffset
     val declaredLength = fileDescriptor.declaredLength
     return fileChannel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+}
+
+private fun mirrorNormalizedX(features: FloatArray): FloatArray {
+    val out = features.copyOf()
+
+    // 21 landmarks * (x, y, z)
+    for (i in 0 until 21) {
+        val xIndex = i * 3
+        out[xIndex] = -out[xIndex]
+    }
+
+    return out
 }
 
 //private fun handLandmarksToInputBuffer(
