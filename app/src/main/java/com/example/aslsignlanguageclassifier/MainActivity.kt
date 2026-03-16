@@ -172,7 +172,6 @@ fun CameraPreviewScreen() {
 
                     val matrix = Matrix().apply {
                         postRotate(rotationDegrees.toFloat())
-                        postScale(-1f, 1f, bitmap.width / 2f, bitmap.height / 2f)
                     }
 
                     val rotatedBitmap = Bitmap.createBitmap(
@@ -191,7 +190,21 @@ fun CameraPreviewScreen() {
                     if (result.landmarks().isNotEmpty()) {
                         handStatus = "Hand detected"
 
-                        val firstHand = result.landmarks()[0]
+                        var selectedHandIndex = 0
+
+                        val handednessList = result.handednesses()
+                        for (i in handednessList.indices) {
+                            val categoryList = handednessList[i]
+                            if (categoryList.isNotEmpty()) {
+                                val label = categoryList[0].categoryName()
+                                if (label.equals("Right", ignoreCase = true)) {
+                                    selectedHandIndex = i
+                                    break
+                                }
+                            }
+                        }
+
+                        val firstHand = result.landmarks()[selectedHandIndex]
 
                         if (!isLandmarksValidLetter(firstHand)) {
                             predictionText = "Prediction: invalid hand shape"
