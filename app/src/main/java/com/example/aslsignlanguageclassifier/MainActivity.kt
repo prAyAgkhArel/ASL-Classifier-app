@@ -1,53 +1,51 @@
 package com.example.aslsignlanguageclassifier
 
-import androidx.camera.core.ExperimentalGetImage
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.Bundle
-import android.util.Size
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-
-import android.graphics.Bitmap
-import android.graphics.Matrix
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
-import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Text
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.unit.dp
-
 import org.tensorflow.lite.Interpreter
+import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.channels.FileChannel
+import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
 
@@ -95,14 +93,14 @@ fun AppScreen(hasCameraPermission: Boolean) {
     }
 }
 
-@OptIn(androidx.camera.core.ExperimentalGetImage::class)
+@OptIn(ExperimentalGetImage::class)
 @Composable
 fun CameraPreviewScreen() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    var handStatus by remember { androidx.compose.runtime.mutableStateOf("No hand detected") }
-    var predictionText by remember { androidx.compose.runtime.mutableStateOf("Prediction: -") }
+    var handStatus by remember { mutableStateOf("No hand detected") }
+    var predictionText by remember { mutableStateOf("Prediction: -") }
 
     val previewView = remember {
         PreviewView(context).apply {
@@ -111,9 +109,7 @@ fun CameraPreviewScreen() {
         }
     }
 
-    val cameraExecutor = remember {
-        Executors.newSingleThreadExecutor()
-    }
+    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
     val labels = remember {
         loadLabels(context, "letter_labels.txt")
@@ -137,31 +133,31 @@ fun CameraPreviewScreen() {
         HandLandmarker.createFromOptions(context, options)
     }
 
+    val preview = remember {
+        Preview.Builder().build()
+    }
+
+    val imageAnalyzer = remember {
+        ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             handLandmarker.close()
             interpreter.close()
             cameraExecutor.shutdown()
 
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-            val cameraProvider = cameraProviderFuture.get()
+            val cameraProvider = ProcessCameraProvider.getInstance(context).get()
             cameraProvider.unbindAll()
         }
     }
 
     LaunchedEffect(Unit) {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        val cameraProvider = cameraProviderFuture.get()
+        val cameraProvider = ProcessCameraProvider.getInstance(context).get()
 
-        val preview = Preview.Builder()
-            .build()
-            .also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
-            }
-
-        val imageAnalyzer = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
+        preview.setSurfaceProvider(previewView.surfaceProvider)
 
         imageAnalyzer.setAnalyzer(cameraExecutor) { imageProxy ->
             try {
@@ -188,13 +184,10 @@ fun CameraPreviewScreen() {
                     val result = handLandmarker.detect(mpImage)
 
                     if (result.landmarks().isNotEmpty()) {
-                        handStatus = "Hand detected: "
-
                         var selectedHandIndex = 0
                         var selectedHandLabel = "Unknown"
 
                         val handednessList = result.handednesses()
-
                         for (i in handednessList.indices) {
                             val categoryList = handednessList[i]
                             if (categoryList.isNotEmpty()) {
@@ -222,11 +215,12 @@ fun CameraPreviewScreen() {
                         } else {
                             var normalized = normalizeLandmarksLetter(firstHand)
 
+                            // Keep this because your real-world testing showed left hand improves with mirroring.
                             if (selectedHandLabel.equals("Left", ignoreCase = true)) {
                                 normalized = mirrorNormalizedX(normalized)
                             }
 
-                            val inputBuffer = floatArrayToInputBuffer(normalized)
+                            val inputBuffer = normalized21x3ToInputBuffer(normalized)
 
                             val output = Array(1) { FloatArray(labels.size) }
                             interpreter.run(inputBuffer, output)
@@ -278,7 +272,7 @@ fun CameraPreviewScreen() {
             modifier = Modifier.fillMaxSize()
         )
 
-        androidx.compose.foundation.layout.Column(
+        Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .padding(top = 40.dp)
@@ -295,7 +289,7 @@ fun CameraPreviewScreen() {
     }
 }
 
-@androidx.annotation.OptIn(ExperimentalGetImage::class)
+@OptIn(ExperimentalGetImage::class)
 private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
     val image = imageProxy.image ?: return null
 
@@ -403,9 +397,16 @@ private fun isLandmarksValidLetter(
     return boxArea in 0.01f..0.8f
 }
 
-private fun floatArrayToInputBuffer(values: FloatArray): ByteBuffer {
-    val buffer = ByteBuffer.allocateDirect(values.size * 4).order(ByteOrder.nativeOrder())
-    for (v in values) buffer.putFloat(v)
+private fun normalized21x3ToInputBuffer(values: FloatArray): ByteBuffer {
+    val buffer = ByteBuffer.allocateDirect(21 * 3 * 4)
+        .order(ByteOrder.nativeOrder())
+
+    for (i in 0 until 21) {
+        buffer.putFloat(values[i * 3])
+        buffer.putFloat(values[i * 3 + 1])
+        buffer.putFloat(values[i * 3 + 2])
+    }
+
     buffer.rewind()
     return buffer
 }
@@ -418,39 +419,21 @@ private fun loadLabels(context: android.content.Context, fileName: String): List
 
 private fun loadModelFile(context: android.content.Context, fileName: String): ByteBuffer {
     val fileDescriptor = context.assets.openFd(fileName)
-    val inputStream = java.io.FileInputStream(fileDescriptor.fileDescriptor)
+    val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
     val fileChannel = inputStream.channel
     val startOffset = fileDescriptor.startOffset
     val declaredLength = fileDescriptor.declaredLength
-    return fileChannel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+    return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
 }
 
 private fun mirrorNormalizedX(features: FloatArray): FloatArray {
     val out = features.copyOf()
-
-    // 21 landmarks * (x, y, z)
     for (i in 0 until 21) {
         val xIndex = i * 3
         out[xIndex] = -out[xIndex]
     }
-
     return out
 }
-
-//private fun handLandmarksToInputBuffer(
-//    landmarks: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>
-//): ByteBuffer {
-//    val inputBuffer = ByteBuffer.allocateDirect(63 * 4).order(ByteOrder.nativeOrder())
-//
-//    for (lm in landmarks) {
-//        inputBuffer.putFloat(lm.x())
-//        inputBuffer.putFloat(lm.y())
-//        inputBuffer.putFloat(lm.z())
-//    }
-//
-//    inputBuffer.rewind()
-//    return inputBuffer
-//}
 
 private fun argMax(array: FloatArray): Int {
     var bestIdx = 0
