@@ -116,7 +116,7 @@ fun CameraPreviewScreen() {
     }
 
     val interpreter = remember {
-        Interpreter(loadModelFile(context, "asl_letters.tflite"))
+        Interpreter(loadModelFile(context, "asl_letters_augmented.tflite"))
     }
 
     val handLandmarker = remember {
