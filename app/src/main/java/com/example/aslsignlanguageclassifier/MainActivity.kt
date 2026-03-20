@@ -17,12 +17,26 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -41,8 +55,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import java.util.concurrent.Executors
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
 
 class MainActivity : ComponentActivity() {
 
@@ -91,16 +103,14 @@ fun CameraPreviewScreen() {
     var displayStatus by remember { mutableStateOf("No hand detected") }
     var predictionText by remember { mutableStateOf("Prediction: -") }
     var isWordMode by remember { mutableStateOf(false) }
+    var lastPredictedWord by remember { mutableStateOf("None") }
 
-    val WORD_CAPTURE_FRAMES = 15
-    val WORD_SEQUENCE_LENGTH = 30
+    val WORD_CAPTURE_FRAMES = 16
     val MIN_CAPTURE_FRAMES = 8
     val END_ON_MISSING_HAND_FRAMES = 2
     val PREDICTION_HOLD_MS = 2500L
 
     var freezePredictionUntil by remember { mutableLongStateOf(0L) }
-
-    var captureRequested by remember { mutableStateOf(false) }
     var captureActive by remember { mutableStateOf(false) }
     var captureCompleted by remember { mutableStateOf(false) }
     var missingHandFrames by remember { mutableStateOf(0) }
@@ -198,8 +208,6 @@ fun CameraPreviewScreen() {
                 )
 
                 val mpImage = BitmapImageBuilder(rotatedBitmap).build()
-
-                // single hand detection call per frame
                 val handResult = handLandmarker.detect(mpImage)
 
                 if (!isWordMode) {
@@ -209,7 +217,6 @@ fun CameraPreviewScreen() {
                         displayStatus = "Hand: $handedness"
 
                         var normalized = normalizeLandmarksLetter(landmarks)
-
                         if (handedness.equals("Left", true)) {
                             normalized = mirrorNormalizedX(normalized)
                         }
@@ -228,45 +235,49 @@ fun CameraPreviewScreen() {
                         predictionText = "-"
                     }
                 } else {
-                    if (captureRequested && !captureActive) {
-                        captureRequested = false
-                        captureActive = true
-                        captureCompleted = false
-                        missingHandFrames = 0
-                        wordCaptureBuffer.clear()
-                        displayStatus = "Recording..."
-                        predictionText = "Recording word clip..."
-                    }
+                    val poseResult = poseLandmarker.detect(mpImage)
+                    val hasHand = handResult.landmarks().isNotEmpty()
 
-                    if (captureActive) {
-                        val poseResult = poseLandmarker.detect(mpImage)
-                        val hasHand = handResult.landmarks().isNotEmpty()
-
-                        if (hasHand) {
+                    if (hasHand) {
+                        if (!captureActive) {
+                            captureActive = true
+                            captureCompleted = false
                             missingHandFrames = 0
+                            wordCaptureBuffer.clear()
                             displayStatus = "Recording..."
-                            predictionText = "Recording word clip... ${wordCaptureBuffer.size + 1}/$WORD_CAPTURE_FRAMES"
+                            predictionText = "Started auto capture..."
+                        }
 
-                            val frame258 = buildWordRawFrameFromPoseAndHands(
-                                poseResult = poseResult,
-                                handResult = handResult
+                        missingHandFrames = 0
+                        displayStatus = "Recording..."
+                        predictionText =
+                            "Recording word clip... ${wordCaptureBuffer.size + 1}/$WORD_CAPTURE_FRAMES"
+
+                        val frame258 = buildWordRawFrameFromPoseAndHands(
+                            poseResult = poseResult,
+                            handResult = handResult
+                        )
+                        wordCaptureBuffer.add(frame258)
+
+                        if (wordCaptureBuffer.size >= WORD_CAPTURE_FRAMES) {
+                            captureActive = false
+                            captureCompleted = true
+
+                            val resultText = runWordInferenceHolisticStyle(
+                                captureBuffer = wordCaptureBuffer,
+                                wordInterpreter = wordInterpreter,
+                                wordLabels = wordLabels
                             )
 
-                            wordCaptureBuffer.add(frame258)
+                            predictionText = resultText
+                            displayStatus = "Predicted"
+                            freezePredictionUntil = now + PREDICTION_HOLD_MS
+                            lastPredictedWord = extractPredictedWord(resultText)
 
-                            if (wordCaptureBuffer.size >= WORD_CAPTURE_FRAMES) {
-                                captureActive = false
-                                captureCompleted = true
-
-                                predictionText = runWordInferenceHolisticStyle(
-                                    captureBuffer = wordCaptureBuffer,
-                                    wordInterpreter = wordInterpreter,
-                                    wordLabels = wordLabels
-                                )
-                                displayStatus = "Predicted"
-                                freezePredictionUntil = now + PREDICTION_HOLD_MS
-                            }
-                        } else {
+                            wordCaptureBuffer.clear()
+                        }
+                    } else {
+                        if (captureActive) {
                             missingHandFrames += 1
 
                             if (missingHandFrames >= END_ON_MISSING_HAND_FRAMES &&
@@ -276,28 +287,27 @@ fun CameraPreviewScreen() {
                                 captureCompleted = true
                                 missingHandFrames = 0
 
-                                predictionText = runWordInferenceHolisticStyle(
+                                val resultText = runWordInferenceHolisticStyle(
                                     captureBuffer = wordCaptureBuffer,
                                     wordInterpreter = wordInterpreter,
                                     wordLabels = wordLabels
                                 )
+
+                                predictionText = resultText
                                 displayStatus = "Predicted"
                                 freezePredictionUntil = now + PREDICTION_HOLD_MS
+                                lastPredictedWord = extractPredictedWord(resultText)
+
+                                wordCaptureBuffer.clear()
                             } else {
                                 displayStatus = "Recording..."
-                                predictionText = "Show hand to continue... ${wordCaptureBuffer.size}/$WORD_CAPTURE_FRAMES"
-                            }
-                        }
-                    } else {
-                        if (captureCompleted) {
-                            if (now > freezePredictionUntil) {
-                                displayStatus = "Ready for next word"
-                                predictionText = "Tap Start word capture"
+                                predictionText =
+                                    "Waiting for hand... ${wordCaptureBuffer.size}/$WORD_CAPTURE_FRAMES"
                             }
                         } else {
                             if (now > freezePredictionUntil) {
                                 displayStatus = "Ready for word"
-                                predictionText = "Tap Start word capture"
+                                predictionText = "Show hand to sign"
                             }
                         }
                     }
@@ -312,7 +322,6 @@ fun CameraPreviewScreen() {
         }
 
         val cameraProvider = ProcessCameraProvider.getInstance(context).get()
-
         cameraProvider.unbindAll()
         cameraProvider.bindToLifecycle(
             lifecycleOwner,
@@ -337,6 +346,7 @@ fun CameraPreviewScreen() {
                     Text(displayStatus)
                     Text(predictionText)
                     Text(if (isWordMode) "Mode: WORD" else "Mode: LETTER")
+                    Text("Last word: $lastPredictedWord")
                 }
             }
 
@@ -346,19 +356,16 @@ fun CameraPreviewScreen() {
                 Button(
                     onClick = {
                         isWordMode = !isWordMode
-                        captureRequested = false
                         captureActive = false
                         captureCompleted = false
                         missingHandFrames = 0
                         wordCaptureBuffer.clear()
                         freezePredictionUntil = 0L
-
                         predictionText = if (isWordMode) {
                             "Switched to WORD mode"
                         } else {
                             "Switched to LETTER mode"
                         }
-
                         displayStatus = if (isWordMode) "Ready for word" else "Ready for letter"
                     }
                 ) {
@@ -368,22 +375,6 @@ fun CameraPreviewScreen() {
                 if (isWordMode) {
                     Button(
                         onClick = {
-                            captureRequested = true
-                            captureCompleted = false
-                            captureActive = false
-                            missingHandFrames = 0
-                            freezePredictionUntil = 0L
-                            displayStatus = "Ready..."
-                            predictionText = "Starting capture..."
-                        },
-                        enabled = !captureActive
-                    ) {
-                        Text("Start word capture")
-                    }
-
-                    Button(
-                        onClick = {
-                            captureRequested = false
                             captureActive = false
                             captureCompleted = false
                             missingHandFrames = 0
@@ -631,14 +622,14 @@ private fun resampleSequenceRaw(seq: List<FloatArray>, targetLen: Int = 30): Lis
 }
 
 private fun preprocessWordSequence(rawSeq: List<FloatArray>): Array<FloatArray> {
-    val WORD_SEQ_LEN = 30
-    val WORD_TRIM_START = 4
+    val wordSeqLen = 30
+    val wordTrimStart = 4
 
     var seq = rawSeq
-    if (seq.size >= WORD_TRIM_START + WORD_SEQ_LEN) {
-        seq = seq.drop(WORD_TRIM_START)
+    if (seq.size >= wordTrimStart + wordSeqLen) {
+        seq = seq.drop(wordTrimStart)
     }
-    seq = resampleSequenceRaw(seq, WORD_SEQ_LEN)
+    seq = resampleSequenceRaw(seq, wordSeqLen)
 
     val normSeq = Array(seq.size) { i -> normalizeWordFrame(seq[i]) }
     val featSeq = Array(seq.size) { FloatArray(516) }
@@ -679,7 +670,7 @@ private fun runWordInferenceHolisticStyle(
     val avg = FloatArray(wordLabels.size)
 
     for (batch in batches) {
-        val input = Array(1) { Array(WORD_SEQUENCE_LENGTH_PLACEHOLDER) { FloatArray(516) } }
+        val input = Array(1) { Array(30) { FloatArray(516) } }
         for (i in 0 until 30) {
             for (j in 0 until 516) {
                 input[0][i][j] = batch[i][j]
@@ -717,7 +708,16 @@ private fun runWordInferenceHolisticStyle(
     }
 }
 
-private const val WORD_SEQUENCE_LENGTH_PLACEHOLDER = 30
+private fun extractPredictedWord(resultText: String): String {
+    return if (resultText.startsWith("Word: ")) {
+        resultText.removePrefix("Word: ")
+            .substringBefore(" (")
+            .substringBefore(" [")
+            .trim()
+    } else {
+        resultText
+    }
+}
 
 @OptIn(ExperimentalGetImage::class)
 private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
@@ -730,7 +730,6 @@ private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
     val vSize = vBuffer.remaining()
 
     val nv21 = ByteArray(ySize + uSize + vSize)
-
     yBuffer.get(nv21, 0, ySize)
     vBuffer.get(nv21, ySize, vSize)
     uBuffer.get(nv21, ySize + vSize, uSize)
