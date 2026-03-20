@@ -10,12 +10,17 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
-import androidx.camera.core.*
+import androidx.camera.core.ExperimentalGetImage
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.core.CameraSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -23,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.mediapipe.framework.image.BitmapImageBuilder
@@ -34,10 +40,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import java.util.concurrent.Executors
-
-import androidx.compose.material3.Button
-import androidx.compose.material3.Surface
-import androidx.compose.ui.zIndex
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 
 class MainActivity : ComponentActivity() {
 
@@ -68,25 +73,37 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun AppScreen(hasCameraPermission: Boolean) {
-    if (hasCameraPermission) CameraPreviewScreen()
-    else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text("Camera permission denied")
+    if (hasCameraPermission) {
+        CameraPreviewScreen()
+    } else {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Camera permission denied")
+        }
     }
 }
 
 @OptIn(ExperimentalGetImage::class)
 @Composable
 fun CameraPreviewScreen() {
-
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    var handStatus by remember { mutableStateOf("No hand detected") }
+    var displayStatus by remember { mutableStateOf("No hand detected") }
     var predictionText by remember { mutableStateOf("Prediction: -") }
     var isWordMode by remember { mutableStateOf(false) }
 
-    val SEQUENCE_LENGTH = 30
-    val sequenceBuffer = remember { ArrayList<FloatArray>() }
+    val LETTER_SEQUENCE_LENGTH = 30
+    val WORD_CAPTURE_FRAMES = 40
+    val WORD_SEQUENCE_LENGTH = 30
+    val PREDICTION_HOLD_MS = 2500L
+
+    var freezePredictionUntil by remember { mutableLongStateOf(0L) }
+
+    var captureRequested by remember { mutableStateOf(false) }
+    var captureActive by remember { mutableStateOf(false) }
+    var captureCompleted by remember { mutableStateOf(false) }
+
+    val wordCaptureBuffer = remember { ArrayList<FloatArray>() }
 
     val previewView = remember {
         PreviewView(context).apply {
@@ -116,10 +133,24 @@ fun CameraPreviewScreen() {
         val options = HandLandmarker.HandLandmarkerOptions.builder()
             .setBaseOptions(baseOptions)
             .setRunningMode(RunningMode.IMAGE)
-            .setNumHands(1)
+            .setNumHands(2)
             .build()
 
         HandLandmarker.createFromOptions(context, options)
+    }
+
+    val poseLandmarker = remember {
+        val baseOptions = com.google.mediapipe.tasks.core.BaseOptions.builder()
+            .setModelAssetPath("pose_landmarker_lite.task")
+            .build()
+
+        val options = PoseLandmarker.PoseLandmarkerOptions.builder()
+            .setBaseOptions(baseOptions)
+            .setRunningMode(RunningMode.IMAGE)
+            .setNumPoses(1)
+            .build()
+
+        PoseLandmarker.createFromOptions(context, options)
     }
 
     val preview = remember { Preview.Builder().build() }
@@ -133,6 +164,7 @@ fun CameraPreviewScreen() {
     DisposableEffect(Unit) {
         onDispose {
             handLandmarker.close()
+            poseLandmarker.close()
             interpreter.close()
             wordInterpreter.close()
             cameraExecutor.shutdown()
@@ -140,167 +172,37 @@ fun CameraPreviewScreen() {
     }
 
     LaunchedEffect(Unit) {
-
         preview.setSurfaceProvider(previewView.surfaceProvider)
 
-//        imageAnalyzer.setAnalyzer(cameraExecutor) { imageProxy ->
-//            try {
-//                val bitmap = imageProxyToBitmap(imageProxy)
-//
-//                if (bitmap != null) {
-//                    val matrix = Matrix().apply {
-//                        postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
-//                    }
-//
-//                    val rotatedBitmap = Bitmap.createBitmap(
-//                        bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
-//                    )
-//
-//                    val mpImage = BitmapImageBuilder(rotatedBitmap).build()
-//                    val result = handLandmarker.detect(mpImage)
-//
-//                    if (result.landmarks().isNotEmpty()) {
-//
-//                        val landmarks = result.landmarks()[0]
-//                        val handedness = result.handednesses()[0][0].categoryName()
-//                        handStatus = "Hand: $handedness"
-//
-//                        var normalized = normalizeLandmarksLetter(landmarks)
-//
-//                        if (handedness.equals("Left", true)) {
-//                            normalized = mirrorNormalizedX(normalized)
-//                        }
-//
-//                        // ================= WORD MODE =================
-//                        if (isWordMode) {
-//
-//                            // 1. Map to 258 base features (Pose + Left Hand + Right Hand)
-//                            val frame258 = FloatArray(258)
-//                            val isLeft = handedness.equals("Left", true)
-//
-//                            // Pose takes indices 0..131. Left hand starts at 132, Right hand starts at 195.
-//                            val offset = if (isLeft) 132 else 195
-//
-//                            // Copy the 63 normalized hand features into the correct slot; the rest remain 0.0f
-//                            System.arraycopy(normalized, 0, frame258, offset, 63)
-//
-//                            sequenceBuffer.add(frame258)
-//
-//                            if (sequenceBuffer.size > SEQUENCE_LENGTH) {
-//                                sequenceBuffer.removeAt(0)
-//                            }
-//
-//                            if (sequenceBuffer.size == SEQUENCE_LENGTH) {
-//
-//                                // 2. Build the 516-feature vector (Base + Velocity)
-//                                val input516 = FloatArray(SEQUENCE_LENGTH * 516)
-//                                var idx = 0
-//
-//                                for (i in 0 until SEQUENCE_LENGTH) {
-//                                    val currentFrame = sequenceBuffer[i] // FloatArray(258)
-//                                    // If it's the first frame, velocity is 0, so subtract it from itself
-//                                    val prevFrame = if (i == 0) currentFrame else sequenceBuffer[i - 1]
-//
-//                                    // Add the 258 normalized positions
-//                                    for (j in 0 until 258) {
-//                                        input516[idx++] = currentFrame[j]
-//                                    }
-//                                    // Add the 258 velocity features (current - previous)
-//                                    for (j in 0 until 258) {
-//                                        input516[idx++] = currentFrame[j] - prevFrame[j]
-//                                    }
-//                                }
-//
-//                                val buffer = ByteBuffer.allocateDirect(input516.size * 4).order(ByteOrder.nativeOrder())
-//
-//                                for (v in input516) {
-//                                    buffer.putFloat(v)
-//                                }
-//                                buffer.rewind()
-//
-//                                val output = Array(1) { FloatArray(wordLabels.size) }
-//                                wordInterpreter.run(buffer, output)
-//
-//                                val scores = output[0]
-//                                val bestIdx = argMax(scores)
-//                                val conf = scores[bestIdx]
-//
-//                                // Using 0.42f to match the MAYBE_ACCEPT_CONF from your Python script
-//                                predictionText = if (conf > 0.42f) {
-//                                    "Word: ${wordLabels[bestIdx]} (%.2f)".format(conf)
-//                                } else {
-//                                    "Word: low confidence"
-//                                }
-//                            } else {
-//                                predictionText = "Collecting: ${sequenceBuffer.size}/30"
-//                            }
-//
-//                        }
-//                        // ================= LETTER MODE =================
-//                        else {
-//
-//                            val buffer = normalized21x3ToInputBuffer(normalized)
-//
-//                            val output = Array(1) { FloatArray(labels.size) }
-//                            interpreter.run(buffer, output)
-//
-//                            val scores = output[0]
-//                            val bestIdx = argMax(scores)
-//                            val conf = scores[bestIdx]
-//
-//                            predictionText =
-//                                if (conf > 0.80f)
-//                                    "Letter: ${labels[bestIdx]} (%.2f)".format(conf)
-//                                else
-//                                    "Letter: low confidence"
-//                        }
-//
-//                    } else {
-//                        handStatus = "No hand"
-//                        predictionText = "-"
-//                        sequenceBuffer.clear()
-//                    }
-//                }
-//
-//            } catch (e: Exception) {
-//                e.printStackTrace()
-//            } finally {
-//                imageProxy.close()
-//            }
-//        }
         imageAnalyzer.setAnalyzer(cameraExecutor) { imageProxy ->
             try {
-                android.util.Log.d("HAND_DEBUG", "imageProxy: ${imageProxy.width}x${imageProxy.height}, rotation=${imageProxy.imageInfo.rotationDegrees}")
-
+                val now = System.currentTimeMillis()
                 val bitmap = imageProxyToBitmap(imageProxy)
 
                 if (bitmap == null) {
-                    handStatus = "Bitmap null"
-                    predictionText = "-"
-                    sequenceBuffer.clear()
-                } else {
-                    android.util.Log.d("HAND_DEBUG", "bitmap: ${bitmap.width}x${bitmap.height}")
-
-                    val matrix = Matrix().apply {
-                        postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
+                    if (now > freezePredictionUntil) {
+                        displayStatus = "Bitmap null"
+                        predictionText = "-"
                     }
+                    return@setAnalyzer
+                }
 
-                    val rotatedBitmap = Bitmap.createBitmap(
-                        bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
-                    )
+                val matrix = Matrix().apply {
+                    postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
+                }
 
-                    android.util.Log.d("HAND_DEBUG", "rotatedBitmap: ${rotatedBitmap.width}x${rotatedBitmap.height}")
+                val rotatedBitmap = Bitmap.createBitmap(
+                    bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+                )
 
-                    val mpImage = BitmapImageBuilder(rotatedBitmap).build()
-                    val result = handLandmarker.detect(mpImage)
+                val mpImage = BitmapImageBuilder(rotatedBitmap).build()
+                val result = handLandmarker.detect(mpImage)
 
-                    android.util.Log.d("HAND_DEBUG", "hands found: ${result.landmarks().size}")
-
+                if (!isWordMode) {
                     if (result.landmarks().isNotEmpty()) {
-
                         val landmarks = result.landmarks()[0]
                         val handedness = result.handednesses()[0][0].categoryName()
-                        handStatus = "Hand: $handedness"
+                        displayStatus = "Hand: $handedness"
 
                         var normalized = normalizeLandmarksLetter(landmarks)
 
@@ -308,75 +210,81 @@ fun CameraPreviewScreen() {
                             normalized = mirrorNormalizedX(normalized)
                         }
 
-                        if (isWordMode) {
-                            val frame258 = FloatArray(258)
-                            val isLeft = handedness.equals("Left", true)
-                            val offset = if (isLeft) 132 else 195
-                            System.arraycopy(normalized, 0, frame258, offset, 63)
+                        val buffer = normalized21x3ToInputBuffer(normalized)
+                        val output = Array(1) { FloatArray(labels.size) }
+                        interpreter.run(buffer, output)
 
-                            sequenceBuffer.add(frame258)
+                        val scores = output[0]
+                        val bestIdx = argMax(scores)
+                        val conf = scores[bestIdx]
 
-                            if (sequenceBuffer.size > SEQUENCE_LENGTH) {
-                                sequenceBuffer.removeAt(0)
-                            }
+                        predictionText = "Letter top: ${labels[bestIdx]} (%.4f)".format(conf)
+                    } else {
+                        displayStatus = "No hand"
+                        predictionText = "-"
+                    }
+                } else {
+                    if (captureRequested && !captureActive) {
+                        captureRequested = false
+                        captureActive = true
+                        captureCompleted = false
+                        wordCaptureBuffer.clear()
+                        displayStatus = "Recording..."
+                        predictionText = "Recording word clip..."
+                    }
 
-                            if (sequenceBuffer.size == SEQUENCE_LENGTH) {
-                                val input516 = FloatArray(SEQUENCE_LENGTH * 516)
-                                var idx = 0
+                    if (captureActive) {
+                        val poseResult = poseLandmarker.detect(mpImage)
+                        val handResult = handLandmarker.detect(mpImage)
 
-                                for (i in 0 until SEQUENCE_LENGTH) {
-                                    val currentFrame = sequenceBuffer[i]
-                                    val prevFrame = if (i == 0) currentFrame else sequenceBuffer[i - 1]
+                        val hasPose = poseResult.landmarks().isNotEmpty()
+                        val hasHand = handResult.landmarks().isNotEmpty()
 
-                                    for (j in 0 until 258) {
-                                        input516[idx++] = currentFrame[j]
-                                    }
-                                    for (j in 0 until 258) {
-                                        input516[idx++] = currentFrame[j] - prevFrame[j]
-                                    }
-                                }
+                        if (hasPose || hasHand) {
+                            displayStatus = "Recording..."
+                            predictionText = "Recording word clip... ${wordCaptureBuffer.size + 1}/$WORD_CAPTURE_FRAMES"
 
-                                val buffer = ByteBuffer.allocateDirect(input516.size * 4)
-                                    .order(ByteOrder.nativeOrder())
+                            val frame258 = buildWordRawFrameFromPoseAndHands(
+                                poseResult = poseResult,
+                                handResult = handResult
+                            )
 
-                                for (v in input516) {
-                                    buffer.putFloat(v)
-                                }
-                                buffer.rewind()
+                            wordCaptureBuffer.add(frame258)
 
-                                val output = Array(1) { FloatArray(wordLabels.size) }
-                                wordInterpreter.run(buffer, output)
+                            if (wordCaptureBuffer.size >= WORD_CAPTURE_FRAMES) {
+                                captureActive = false
+                                captureCompleted = true
 
-                                val scores = output[0]
-                                val bestIdx = argMax(scores)
-                                val conf = scores[bestIdx]
-
-                                predictionText = "Word top: ${wordLabels[bestIdx]} (%.4f)".format(conf)
-                            } else {
-                                predictionText = "Collecting: ${sequenceBuffer.size}/30"
+                                predictionText = runWordInferenceHolisticStyle(
+                                    captureBuffer = wordCaptureBuffer,
+                                    wordInterpreter = wordInterpreter,
+                                    wordLabels = wordLabels
+                                )
+                                displayStatus = "Predicted"
+                                freezePredictionUntil = now + PREDICTION_HOLD_MS
                             }
                         } else {
-                            val buffer = normalized21x3ToInputBuffer(normalized)
-                            val output = Array(1) { FloatArray(labels.size) }
-                            interpreter.run(buffer, output)
-
-                            val scores = output[0]
-                            val bestIdx = argMax(scores)
-                            val conf = scores[bestIdx]
-
-                            predictionText = "Letter top: ${labels[bestIdx]} (%.4f)".format(conf)
+                            displayStatus = "Recording..."
+                            predictionText = "Show hand to continue... ${wordCaptureBuffer.size}/$WORD_CAPTURE_FRAMES"
                         }
-
                     } else {
-                        handStatus = "No hand"
-                        predictionText = "-"
-                        sequenceBuffer.clear()
+                        if (captureCompleted) {
+                            if (now > freezePredictionUntil) {
+                                displayStatus = "Ready for next word"
+                                predictionText = "Tap Start word capture"
+                            }
+                        } else {
+                            if (now > freezePredictionUntil) {
+                                displayStatus = "Ready for word"
+                                predictionText = "Tap Start word capture"
+                            }
+                        }
                     }
                 }
-
             } catch (e: Exception) {
                 e.printStackTrace()
-                handStatus = "Error"
+                displayStatus = "Error"
+                predictionText = e.javaClass.simpleName
             } finally {
                 imageProxy.close()
             }
@@ -393,27 +301,7 @@ fun CameraPreviewScreen() {
         )
     }
 
-//    Box(Modifier.fillMaxSize()) {
-//
-//        AndroidView({ previewView }, Modifier.fillMaxSize())
-//
-//        Column(
-//            modifier = Modifier
-//                .align(Alignment.TopCenter)
-//                .padding(top = 40.dp)
-//                .clickable {
-//                    isWordMode = !isWordMode
-//                    sequenceBuffer.clear()
-//                }
-//        ) {
-//            Text(handStatus)
-//            Text(predictionText)
-//            Text(if (isWordMode) "Mode: WORD" else "Mode: LETTER")
-//            Text("Tap to switch")
-//        }
-//    }
     Box(Modifier.fillMaxSize()) {
-
         AndroidView({ previewView }, Modifier.fillMaxSize())
 
         Column(
@@ -425,7 +313,7 @@ fun CameraPreviewScreen() {
         ) {
             Surface {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Text(handStatus)
+                    Text(displayStatus)
                     Text(predictionText)
                     Text(if (isWordMode) "Mode: WORD" else "Mode: LETTER")
                 }
@@ -433,14 +321,56 @@ fun CameraPreviewScreen() {
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            Button(
-                onClick = {
-                    isWordMode = !isWordMode
-                    sequenceBuffer.clear()
-                    predictionText = if (isWordMode) "Switched to WORD mode" else "Switched to LETTER mode"
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = {
+                        isWordMode = !isWordMode
+                        captureRequested = false
+                        captureActive = false
+                        captureCompleted = false
+                        wordCaptureBuffer.clear()
+                        freezePredictionUntil = 0L
+
+                        predictionText = if (isWordMode) {
+                            "Switched to WORD mode"
+                        } else {
+                            "Switched to LETTER mode"
+                        }
+
+                        displayStatus = if (isWordMode) "Ready for word" else "Ready for letter"
+                    }
+                ) {
+                    Text(if (isWordMode) "Switch to LETTER" else "Switch to WORD")
                 }
-            ) {
-                Text(if (isWordMode) "Switch to LETTER" else "Switch to WORD")
+
+                if (isWordMode) {
+                    Button(
+                        onClick = {
+                            captureRequested = true
+                            captureCompleted = false
+                            freezePredictionUntil = 0L
+                            displayStatus = "Ready..."
+                            predictionText = "Starting capture..."
+                        },
+                        enabled = !captureActive
+                    ) {
+                        Text("Start word capture")
+                    }
+
+                    Button(
+                        onClick = {
+                            captureRequested = false
+                            captureActive = false
+                            captureCompleted = false
+                            wordCaptureBuffer.clear()
+                            freezePredictionUntil = 0L
+                            displayStatus = "Ready for word"
+                            predictionText = "Cleared"
+                        }
+                    ) {
+                        Text("Clear")
+                    }
+                }
             }
         }
     }
@@ -448,7 +378,9 @@ fun CameraPreviewScreen() {
 
 /* ---------------- HELPERS ---------------- */
 
-private fun normalizeLandmarksLetter(lm: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>): FloatArray {
+private fun normalizeLandmarksLetter(
+    lm: List<com.google.mediapipe.tasks.components.containers.NormalizedLandmark>
+): FloatArray {
     val out = FloatArray(63)
     val wx = lm[0].x()
     val wy = lm[0].y()
@@ -499,31 +431,269 @@ private fun loadModelFile(c: android.content.Context, name: String): ByteBuffer 
     val input = FileInputStream(fd.fileDescriptor)
     val ch = input.channel
     return ch.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
+
 }
 
-//@OptIn(ExperimentalGetImage::class)
-//private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
-//    val img = image.image ?: return null
-//    val y = img.planes[0].buffer
-//    val u = img.planes[1].buffer
-//    val v = img.planes[2].buffer
-//
-//    val nv21 = ByteArray(y.remaining() + u.remaining() + v.remaining())
-//    y.get(nv21, 0, y.remaining())
-//    v.get(nv21, y.remaining(), v.remaining())
-//    u.get(nv21, y.remaining() + v.remaining(), u.remaining())
-//
-//    val yuv = android.graphics.YuvImage(
-//        nv21, android.graphics.ImageFormat.NV21,
-//        image.width, image.height, null
-//    )
-//
-//    val out = java.io.ByteArrayOutputStream()
-//    yuv.compressToJpeg(android.graphics.Rect(0, 0, image.width, image.height), 90, out)
-//    val bytes = out.toByteArray()
-//
-//    return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-//}
+private fun buildWordRawFrameFromPoseAndHands(
+    poseResult: com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult,
+    handResult: com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
+): FloatArray {
+    val raw = FloatArray(258)
+
+    // Pose -> indices 0..131
+    if (poseResult.landmarks().isNotEmpty()) {
+        val pose = poseResult.landmarks()[0]
+        var idx = 0
+        for (i in 0 until minOf(33, pose.size)) {
+            raw[idx++] = pose[i].x()
+            raw[idx++] = pose[i].y()
+            raw[idx++] = pose[i].z()
+            raw[idx++] = 0f
+        }
+    }
+
+    // Hands -> left 132..194, right 195..257
+    val hands = handResult.landmarks()
+    val handednesses = handResult.handednesses()
+
+    for (h in hands.indices) {
+        if (h >= handednesses.size || handednesses[h].isEmpty()) continue
+
+        val handed = handednesses[h][0].categoryName()
+        val offset = if (handed.equals("Left", true)) 132 else 195
+
+        val hand = hands[h]
+        var idx = offset
+        for (i in 0 until minOf(21, hand.size)) {
+            raw[idx++] = hand[i].x()
+            raw[idx++] = hand[i].y()
+            raw[idx++] = hand[i].z()
+        }
+    }
+
+    return raw
+}
+
+private fun normalizeHand(handFlat: FloatArray): FloatArray {
+    if (handFlat.size != 63) return FloatArray(63)
+    val out = handFlat.copyOf()
+
+    var allZero = true
+    for (v in out) {
+        if (v != 0f) {
+            allZero = false
+            break
+        }
+    }
+    if (allZero) return FloatArray(63)
+
+    val x0 = out[0]
+    val y0 = out[1]
+    val z0 = out[2]
+
+    var scale = 0f
+    for (i in 0 until 21) {
+        val base = i * 3
+        val x = out[base] - x0
+        val y = out[base + 1] - y0
+        val z = out[base + 2] - z0
+        scale += x * x + y * y + z * z
+    }
+    scale = kotlin.math.sqrt(scale / 21f).coerceAtLeast(1e-6f)
+
+    for (i in 0 until 21) {
+        val base = i * 3
+        out[base] = (out[base] - x0) / scale
+        out[base + 1] = (out[base + 1] - y0) / scale
+        out[base + 2] = (out[base + 2] - z0) / scale
+    }
+
+    return out
+}
+
+private fun normalizePose(poseFlat: FloatArray): FloatArray {
+    if (poseFlat.size != 132) return FloatArray(132)
+    val out = poseFlat.copyOf()
+
+    var xyzAllZero = true
+    for (i in 0 until 33) {
+        val base = i * 4
+        if (out[base] != 0f || out[base + 1] != 0f || out[base + 2] != 0f) {
+            xyzAllZero = false
+            break
+        }
+    }
+    if (xyzAllZero) return out
+
+    val ls = 11 * 4
+    val rs = 12 * 4
+
+    val ldx = out[ls]
+    val ldy = out[ls + 1]
+    val ldz = out[ls + 2]
+    val rdx = out[rs]
+    val rdy = out[rs + 1]
+    val rdz = out[rs + 2]
+
+    val leftOk = !(ldx == 0f && ldy == 0f && ldz == 0f)
+    val rightOk = !(rdx == 0f && rdy == 0f && rdz == 0f)
+
+    val centerX: Float
+    val centerY: Float
+    val centerZ: Float
+    val scale: Float
+
+    if (leftOk && rightOk) {
+        centerX = (ldx + rdx) / 2f
+        centerY = (ldy + rdy) / 2f
+        centerZ = (ldz + rdz) / 2f
+        scale = kotlin.math.sqrt(
+            (ldx - rdx) * (ldx - rdx) +
+                    (ldy - rdy) * (ldy - rdy) +
+                    (ldz - rdz) * (ldz - rdz)
+        ).coerceAtLeast(1e-6f)
+    } else {
+        centerX = out[0]
+        centerY = out[1]
+        centerZ = out[2]
+
+        var sum = 0f
+        var count = 0
+        for (i in 0 until 33) {
+            val base = i * 4
+            val x = out[base]
+            val y = out[base + 1]
+            val z = out[base + 2]
+            val norm = kotlin.math.sqrt(x * x + y * y + z * z)
+            if (norm > 0f) {
+                sum += norm
+                count++
+            }
+        }
+        scale = if (count > 0) (sum / count).coerceAtLeast(1e-6f) else 1f
+    }
+
+    for (i in 0 until 33) {
+        val base = i * 4
+        out[base] = (out[base] - centerX) / scale
+        out[base + 1] = (out[base + 1] - centerY) / scale
+        out[base + 2] = (out[base + 2] - centerZ) / scale
+        // visibility stays unchanged
+    }
+
+    return out
+}
+
+private fun normalizeWordFrame(rawFrame: FloatArray): FloatArray {
+    val pose = normalizePose(rawFrame.copyOfRange(0, 132))
+    val lh = normalizeHand(rawFrame.copyOfRange(132, 195))
+    val rh = normalizeHand(rawFrame.copyOfRange(195, 258))
+
+    val out = FloatArray(258)
+    System.arraycopy(pose, 0, out, 0, 132)
+    System.arraycopy(lh, 0, out, 132, 63)
+    System.arraycopy(rh, 0, out, 195, 63)
+    return out
+}
+
+private fun resampleSequenceRaw(seq: List<FloatArray>, targetLen: Int = 30): List<FloatArray> {
+    if (seq.isEmpty()) return emptyList()
+    if (seq.size == targetLen) return seq
+
+    val out = ArrayList<FloatArray>(targetLen)
+    for (i in 0 until targetLen) {
+        val idx = ((i.toFloat() * (seq.size - 1)) / (targetLen - 1)).let { kotlin.math.round(it).toInt() }
+        out.add(seq[idx].copyOf())
+    }
+    return out
+}
+
+private fun preprocessWordSequence(rawSeq: List<FloatArray>): Array<FloatArray> {
+    val WORD_SEQ_LEN = 30
+    val WORD_TRIM_START = 4
+
+    var seq = rawSeq
+    if (seq.size >= WORD_TRIM_START + WORD_SEQ_LEN) {
+        seq = seq.drop(WORD_TRIM_START)
+    }
+    seq = resampleSequenceRaw(seq, WORD_SEQ_LEN)
+
+    val normSeq = Array(seq.size) { i -> normalizeWordFrame(seq[i]) }
+    val featSeq = Array(seq.size) { FloatArray(516) }
+
+    for (i in normSeq.indices) {
+        val prev = if (i == 0) normSeq[i] else normSeq[i - 1]
+        for (j in 0 until 258) {
+            featSeq[i][j] = normSeq[i][j]
+            featSeq[i][258 + j] = normSeq[i][j] - prev[j]
+        }
+    }
+    return featSeq
+}
+
+private fun buildWindowBatches(rawCapture: List<FloatArray>): Array<Array<FloatArray>> {
+    val windows = ArrayList<Array<FloatArray>>()
+
+    if (rawCapture.size >= 38) {
+        val slices = listOf(4 to 34, 6 to 36, 8 to 38)
+        for ((start, end) in slices) {
+            windows.add(preprocessWordSequence(rawCapture.subList(start, end)))
+        }
+    } else {
+        windows.add(preprocessWordSequence(rawCapture))
+    }
+
+    return windows.toTypedArray()
+}
+private fun runWordInferenceHolisticStyle(
+    captureBuffer: ArrayList<FloatArray>,
+    wordInterpreter: Interpreter,
+    wordLabels: List<String>
+): String {
+    if (captureBuffer.isEmpty()) return "No sequence"
+
+    val batches = buildWindowBatches(captureBuffer)
+    val avg = FloatArray(wordLabels.size)
+
+    for (batch in batches) {
+        val input = Array(1) { Array(30) { FloatArray(516) } }
+        for (i in 0 until 30) {
+            for (j in 0 until 516) {
+                input[0][i][j] = batch[i][j]
+            }
+        }
+
+        val output = Array(1) { FloatArray(wordLabels.size) }
+        wordInterpreter.run(input, output)
+
+        for (k in avg.indices) {
+            avg[k] += output[0][k]
+        }
+    }
+
+    for (k in avg.indices) {
+        avg[k] /= batches.size
+    }
+
+    val topIdx = avg.indices.sortedByDescending { avg[it] }.take(3)
+    val bestIdx = topIdx[0]
+    val conf1 = avg[bestIdx]
+    val conf2 = if (topIdx.size > 1) avg[topIdx[1]] else 0f
+    val margin = conf1 - conf2
+
+    val status = when {
+        conf1 >= 0.60f && margin >= 0.11f -> "ACCEPTED"
+        conf1 >= 0.42f && margin >= 0.06f -> "MAYBE"
+        else -> "TRY AGAIN"
+    }
+
+    return if (status == "TRY AGAIN") {
+        "Word: UNKNOWN (${status})"
+    } else {
+        "Word: ${wordLabels[bestIdx]} (${String.format("%.4f", conf1)}) [$status]"
+    }
+}
+
 @OptIn(ExperimentalGetImage::class)
 private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
     val yBuffer = image.planes[0].buffer
