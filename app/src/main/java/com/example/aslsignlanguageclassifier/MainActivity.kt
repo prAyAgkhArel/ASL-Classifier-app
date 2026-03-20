@@ -10,11 +10,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
+import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
-import androidx.camera.core.CameraSelector
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.*
@@ -34,6 +34,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import org.tensorflow.lite.Interpreter
 import java.io.FileInputStream
 import java.nio.ByteBuffer
@@ -42,7 +43,6 @@ import java.nio.channels.FileChannel
 import java.util.concurrent.Executors
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
-import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 
 class MainActivity : ComponentActivity() {
 
@@ -92,9 +92,10 @@ fun CameraPreviewScreen() {
     var predictionText by remember { mutableStateOf("Prediction: -") }
     var isWordMode by remember { mutableStateOf(false) }
 
-    val LETTER_SEQUENCE_LENGTH = 30
-    val WORD_CAPTURE_FRAMES = 40
+    val WORD_CAPTURE_FRAMES = 15
     val WORD_SEQUENCE_LENGTH = 30
+    val MIN_CAPTURE_FRAMES = 8
+    val END_ON_MISSING_HAND_FRAMES = 2
     val PREDICTION_HOLD_MS = 2500L
 
     var freezePredictionUntil by remember { mutableLongStateOf(0L) }
@@ -102,6 +103,7 @@ fun CameraPreviewScreen() {
     var captureRequested by remember { mutableStateOf(false) }
     var captureActive by remember { mutableStateOf(false) }
     var captureCompleted by remember { mutableStateOf(false) }
+    var missingHandFrames by remember { mutableStateOf(0) }
 
     val wordCaptureBuffer = remember { ArrayList<FloatArray>() }
 
@@ -196,12 +198,14 @@ fun CameraPreviewScreen() {
                 )
 
                 val mpImage = BitmapImageBuilder(rotatedBitmap).build()
-                val result = handLandmarker.detect(mpImage)
+
+                // single hand detection call per frame
+                val handResult = handLandmarker.detect(mpImage)
 
                 if (!isWordMode) {
-                    if (result.landmarks().isNotEmpty()) {
-                        val landmarks = result.landmarks()[0]
-                        val handedness = result.handednesses()[0][0].categoryName()
+                    if (handResult.landmarks().isNotEmpty()) {
+                        val landmarks = handResult.landmarks()[0]
+                        val handedness = handResult.handednesses()[0][0].categoryName()
                         displayStatus = "Hand: $handedness"
 
                         var normalized = normalizeLandmarksLetter(landmarks)
@@ -228,6 +232,7 @@ fun CameraPreviewScreen() {
                         captureRequested = false
                         captureActive = true
                         captureCompleted = false
+                        missingHandFrames = 0
                         wordCaptureBuffer.clear()
                         displayStatus = "Recording..."
                         predictionText = "Recording word clip..."
@@ -235,12 +240,10 @@ fun CameraPreviewScreen() {
 
                     if (captureActive) {
                         val poseResult = poseLandmarker.detect(mpImage)
-                        val handResult = handLandmarker.detect(mpImage)
-
-                        val hasPose = poseResult.landmarks().isNotEmpty()
                         val hasHand = handResult.landmarks().isNotEmpty()
 
-                        if (hasPose || hasHand) {
+                        if (hasHand) {
+                            missingHandFrames = 0
                             displayStatus = "Recording..."
                             predictionText = "Recording word clip... ${wordCaptureBuffer.size + 1}/$WORD_CAPTURE_FRAMES"
 
@@ -264,8 +267,26 @@ fun CameraPreviewScreen() {
                                 freezePredictionUntil = now + PREDICTION_HOLD_MS
                             }
                         } else {
-                            displayStatus = "Recording..."
-                            predictionText = "Show hand to continue... ${wordCaptureBuffer.size}/$WORD_CAPTURE_FRAMES"
+                            missingHandFrames += 1
+
+                            if (missingHandFrames >= END_ON_MISSING_HAND_FRAMES &&
+                                wordCaptureBuffer.size >= MIN_CAPTURE_FRAMES
+                            ) {
+                                captureActive = false
+                                captureCompleted = true
+                                missingHandFrames = 0
+
+                                predictionText = runWordInferenceHolisticStyle(
+                                    captureBuffer = wordCaptureBuffer,
+                                    wordInterpreter = wordInterpreter,
+                                    wordLabels = wordLabels
+                                )
+                                displayStatus = "Predicted"
+                                freezePredictionUntil = now + PREDICTION_HOLD_MS
+                            } else {
+                                displayStatus = "Recording..."
+                                predictionText = "Show hand to continue... ${wordCaptureBuffer.size}/$WORD_CAPTURE_FRAMES"
+                            }
                         }
                     } else {
                         if (captureCompleted) {
@@ -328,6 +349,7 @@ fun CameraPreviewScreen() {
                         captureRequested = false
                         captureActive = false
                         captureCompleted = false
+                        missingHandFrames = 0
                         wordCaptureBuffer.clear()
                         freezePredictionUntil = 0L
 
@@ -348,6 +370,8 @@ fun CameraPreviewScreen() {
                         onClick = {
                             captureRequested = true
                             captureCompleted = false
+                            captureActive = false
+                            missingHandFrames = 0
                             freezePredictionUntil = 0L
                             displayStatus = "Ready..."
                             predictionText = "Starting capture..."
@@ -362,6 +386,7 @@ fun CameraPreviewScreen() {
                             captureRequested = false
                             captureActive = false
                             captureCompleted = false
+                            missingHandFrames = 0
                             wordCaptureBuffer.clear()
                             freezePredictionUntil = 0L
                             displayStatus = "Ready for word"
@@ -431,7 +456,6 @@ private fun loadModelFile(c: android.content.Context, name: String): ByteBuffer 
     val input = FileInputStream(fd.fileDescriptor)
     val ch = input.channel
     return ch.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
-
 }
 
 private fun buildWordRawFrameFromPoseAndHands(
@@ -440,7 +464,6 @@ private fun buildWordRawFrameFromPoseAndHands(
 ): FloatArray {
     val raw = FloatArray(258)
 
-    // Pose -> indices 0..131
     if (poseResult.landmarks().isNotEmpty()) {
         val pose = poseResult.landmarks()[0]
         var idx = 0
@@ -452,7 +475,6 @@ private fun buildWordRawFrameFromPoseAndHands(
         }
     }
 
-    // Hands -> left 132..194, right 195..257
     val hands = handResult.landmarks()
     val handednesses = handResult.handednesses()
 
@@ -578,7 +600,6 @@ private fun normalizePose(poseFlat: FloatArray): FloatArray {
         out[base] = (out[base] - centerX) / scale
         out[base + 1] = (out[base + 1] - centerY) / scale
         out[base + 2] = (out[base + 2] - centerZ) / scale
-        // visibility stays unchanged
     }
 
     return out
@@ -602,7 +623,8 @@ private fun resampleSequenceRaw(seq: List<FloatArray>, targetLen: Int = 30): Lis
 
     val out = ArrayList<FloatArray>(targetLen)
     for (i in 0 until targetLen) {
-        val idx = ((i.toFloat() * (seq.size - 1)) / (targetLen - 1)).let { kotlin.math.round(it).toInt() }
+        val idx = ((i.toFloat() * (seq.size - 1)) / (targetLen - 1))
+            .let { kotlin.math.round(it).toInt() }
         out.add(seq[idx].copyOf())
     }
     return out
@@ -645,6 +667,7 @@ private fun buildWindowBatches(rawCapture: List<FloatArray>): Array<Array<FloatA
 
     return windows.toTypedArray()
 }
+
 private fun runWordInferenceHolisticStyle(
     captureBuffer: ArrayList<FloatArray>,
     wordInterpreter: Interpreter,
@@ -656,7 +679,7 @@ private fun runWordInferenceHolisticStyle(
     val avg = FloatArray(wordLabels.size)
 
     for (batch in batches) {
-        val input = Array(1) { Array(30) { FloatArray(516) } }
+        val input = Array(1) { Array(WORD_SEQUENCE_LENGTH_PLACEHOLDER) { FloatArray(516) } }
         for (i in 0 until 30) {
             for (j in 0 until 516) {
                 input[0][i][j] = batch[i][j]
@@ -688,11 +711,13 @@ private fun runWordInferenceHolisticStyle(
     }
 
     return if (status == "TRY AGAIN") {
-        "Word: UNKNOWN (${status})"
+        "Word: UNKNOWN ($status)"
     } else {
         "Word: ${wordLabels[bestIdx]} (${String.format("%.4f", conf1)}) [$status]"
     }
 }
+
+private const val WORD_SEQUENCE_LENGTH_PLACEHOLDER = 30
 
 @OptIn(ExperimentalGetImage::class)
 private fun imageProxyToBitmap(image: ImageProxy): Bitmap? {
