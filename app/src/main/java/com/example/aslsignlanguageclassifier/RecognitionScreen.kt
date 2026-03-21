@@ -1,3 +1,7 @@
+@file:OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class
+)
+
 package com.example.aslsignlanguageclassifier
 
 import androidx.camera.view.PreviewView
@@ -10,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -22,14 +27,21 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -39,17 +51,61 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import android.os.SystemClock
 
 @Composable
 fun AppEntry(hasCameraPermission: Boolean) {
-    if (!hasCameraPermission) {
-        PermissionDeniedScreen()
-        return
+    var selectedTab by rememberSaveable { mutableStateOf(0) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("Sign Language Classifier", fontWeight = FontWeight.Bold)
+                        Text(
+                            "Recognition + Reverse Fingerspelling",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+            TabRow(selectedTabIndex = selectedTab) {
+                Tab(
+                    selected = selectedTab == 0,
+                    onClick = { selectedTab = 0 },
+                    text = { Text("Sign to Text") }
+                )
+                Tab(
+                    selected = selectedTab == 1,
+                    onClick = { selectedTab = 1 },
+                    text = { Text("Text to Sign") }
+                )
+            }
+
+            when (selectedTab) {
+                0 -> {
+                    if (!hasCameraPermission) {
+                        PermissionDeniedScreen()
+                    } else {
+                        RecognitionRoute()
+                    }
+                }
+                1 -> ReverseFingerspellingScreen()
+            }
+        }
     }
-    RecognitionRoute()
 }
+
 
 @Composable
 fun RecognitionRoute() {
@@ -58,24 +114,96 @@ fun RecognitionRoute() {
 
     val previewView = rememberPreviewView(context)
     val engine = remember { RecognitionEngine(context) }
+    val ttsManager = remember { TextToSpeechManager(context) }
 
     val uiState by engine.uiState.collectAsState()
+
+    var lastSpokenText by remember { mutableStateOf("") }
+    var lastSpokenAt by remember { mutableStateOf(0L) }
 
     LaunchedEffect(engine, previewView, lifecycleOwner) {
         engine.start(previewView, lifecycleOwner)
     }
 
-    DisposableEffect(engine) {
+    LaunchedEffect(
+        uiState.predictionText,
+        uiState.lastPredictedWord,
+        uiState.isWordMode
+    ) {
+        val now = SystemClock.elapsedRealtime()
+
+        if (uiState.isWordMode) {
+            val word = uiState.lastPredictedWord.trim()
+
+            val shouldSpeak =
+                word.isNotBlank() &&
+                        !word.equals("None", ignoreCase = true) &&
+                        !word.equals("UNKNOWN", ignoreCase = true) &&
+                        word != lastSpokenText &&
+                        now - lastSpokenAt > 1500L
+
+            if (shouldSpeak) {
+                ttsManager.speak(word)
+                lastSpokenText = word
+                lastSpokenAt = now
+            }
+        } else {
+            val letter = extractLetterForSpeech(uiState.predictionText)
+
+            val shouldSpeak =
+                letter != null &&
+                        letter != lastSpokenText &&
+                        now - lastSpokenAt > 900L
+
+            if (shouldSpeak) {
+                ttsManager.speak(letter)
+                lastSpokenText = letter
+                lastSpokenAt = now
+            }
+        }
+    }
+
+    DisposableEffect(engine, ttsManager) {
         onDispose {
             engine.release()
+            ttsManager.shutdown()
         }
     }
 
     RecognitionScreen(
         previewView = previewView,
         uiState = uiState,
-        onSwitchMode = engine::toggleMode,
-        onClearWord = engine::clearWordState
+        onSwitchMode = {
+            engine.toggleMode()
+            lastSpokenText = ""
+            lastSpokenAt = 0L
+        },
+        onClearWord = {
+            engine.clearWordState()
+            lastSpokenText = ""
+            lastSpokenAt = 0L
+        },
+        onSpeak = {
+            if (uiState.isWordMode) {
+                val word = uiState.lastPredictedWord.trim()
+                if (
+                    word.isNotBlank() &&
+                    !word.equals("None", ignoreCase = true) &&
+                    !word.equals("UNKNOWN", ignoreCase = true)
+                ) {
+                    ttsManager.speak(word)
+                    lastSpokenText = word
+                    lastSpokenAt = SystemClock.elapsedRealtime()
+                }
+            } else {
+                val letter = extractLetterForSpeech(uiState.predictionText)
+                if (letter != null) {
+                    ttsManager.speak(letter)
+                    lastSpokenText = letter
+                    lastSpokenAt = SystemClock.elapsedRealtime()
+                }
+            }
+        }
     )
 }
 
@@ -94,7 +222,8 @@ fun RecognitionScreen(
     previewView: PreviewView,
     uiState: RecognitionUiState,
     onSwitchMode: () -> Unit,
-    onClearWord: () -> Unit
+    onClearWord: () -> Unit,
+    onSpeak: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
@@ -118,7 +247,8 @@ fun RecognitionScreen(
             BottomControlsCard(
                 uiState = uiState,
                 onSwitchMode = onSwitchMode,
-                onClearWord = onClearWord
+                onClearWord = onClearWord,
+                onSpeak = onSpeak
             )
         }
 
@@ -161,11 +291,7 @@ private fun TopInfoCard(uiState: RecognitionUiState) {
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(
-                text = if (uiState.isWordMode) {
-                    "ASL Word Recognition"
-                } else {
-                    "ASL Letter Recognition"
-                },
+                text = if (uiState.isWordMode) "ASL Word Recognition" else "ASL Letter Recognition",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
@@ -177,9 +303,7 @@ private fun TopInfoCard(uiState: RecognitionUiState) {
                 hasError = uiState.errorMessage != null
             )
 
-            PredictionPanel(
-                predictionText = uiState.predictionText
-            )
+            PredictionPanel(predictionText = uiState.predictionText)
 
             Text(
                 text = "Last word: ${uiState.lastPredictedWord}",
@@ -265,8 +389,9 @@ private fun ErrorPanel(message: String) {
 private fun BottomControlsCard(
     uiState: RecognitionUiState,
     onSwitchMode: () -> Unit,
-    onClearWord: () -> Unit
-) {
+    onClearWord: () -> Unit,
+    onSpeak: () -> Unit
+){
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(26.dp),
@@ -303,11 +428,21 @@ private fun BottomControlsCard(
                     )
                 ) {
                     Text(
-                        text = if (uiState.isWordMode) {
-                            "Switch to LETTER"
-                        } else {
-                            "Switch to WORD"
-                        },
+                        text = if (uiState.isWordMode) "Switch to LETTER" else "Switch to WORD",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Button(
+                    onClick = onSpeak,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF6A1B9A)
+                    )
+                ) {
+                    Text(
+                        text = "Speak",
                         fontWeight = FontWeight.SemiBold
                     )
                 }
@@ -361,9 +496,7 @@ private fun EngineLoadingOverlay() {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                CircularProgressIndicator(
-                    color = Color(0xFF93C5FD)
-                )
+                CircularProgressIndicator(color = Color(0xFF93C5FD))
                 Text(
                     text = "Starting recognition engine...",
                     style = MaterialTheme.typography.bodyLarge,
@@ -399,7 +532,7 @@ private fun PermissionDeniedScreen() {
                     color = Color.White,
                     fontWeight = FontWeight.Bold
                 )
-                Spacer(modifier = Modifier.padding(top = 8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "Please allow camera access to use sign recognition.",
                     style = MaterialTheme.typography.bodyMedium,
@@ -407,5 +540,32 @@ private fun PermissionDeniedScreen() {
                 )
             }
         }
+    }
+}
+
+private fun extractLetterForSpeech(predictionText: String): String? {
+    val clean = predictionText.trim()
+
+    if (
+        clean.isBlank() ||
+        clean == "-" ||
+        clean.equals("Prediction: -", ignoreCase = true) ||
+        clean.contains("No hand", ignoreCase = true) ||
+        clean.contains("low confidence", ignoreCase = true)
+    ) return null
+
+    return when {
+        clean.startsWith("Letter:", ignoreCase = true) -> {
+            clean.removePrefix("Letter:")
+                .trim()
+                .substringBefore("(")
+                .substringBefore(" ")
+                .trim()
+                .takeIf { it.length == 1 && it[0].isLetter() }
+        }
+
+        clean.length == 1 && clean[0].isLetter() -> clean
+
+        else -> null
     }
 }
