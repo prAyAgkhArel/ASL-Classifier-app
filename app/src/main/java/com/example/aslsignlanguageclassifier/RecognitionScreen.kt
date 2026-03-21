@@ -118,48 +118,52 @@ fun RecognitionRoute() {
 
     val uiState by engine.uiState.collectAsState()
 
-    var lastSpokenText by remember { mutableStateOf("") }
-    var lastSpokenAt by remember { mutableStateOf(0L) }
+    var lastSpokenWord by remember { mutableStateOf("") }
+    var lastSpokenLetter by remember { mutableStateOf("") }
+    var suppressNextWordSpeak by remember { mutableStateOf(false) }
 
     LaunchedEffect(engine, previewView, lifecycleOwner) {
         engine.start(previewView, lifecycleOwner)
     }
 
+    // Auto speak only when a NEW completed word appears
     LaunchedEffect(
-        uiState.predictionText,
         uiState.lastPredictedWord,
+        uiState.displayStatus,
         uiState.isWordMode
     ) {
-        val now = SystemClock.elapsedRealtime()
+        if (!uiState.isWordMode) return@LaunchedEffect
 
-        if (uiState.isWordMode) {
-            val word = uiState.lastPredictedWord.trim()
+        val word = uiState.lastPredictedWord.trim()
+        val shouldSpeak =
+            uiState.displayStatus.equals("Predicted", ignoreCase = true) &&
+                    word.isNotBlank() &&
+                    !word.equals("None", ignoreCase = true) &&
+                    !word.equals("UNKNOWN", ignoreCase = true) &&
+                    word != lastSpokenWord &&
+                    !suppressNextWordSpeak
 
-            val shouldSpeak =
-                word.isNotBlank() &&
-                        !word.equals("None", ignoreCase = true) &&
-                        !word.equals("UNKNOWN", ignoreCase = true) &&
-                        word != lastSpokenText &&
-                        now - lastSpokenAt > 1500L
+        if (shouldSpeak) {
+            ttsManager.speak(word)
+            lastSpokenWord = word
+        }
 
-            if (shouldSpeak) {
-                ttsManager.speak(word)
-                lastSpokenText = word
-                lastSpokenAt = now
-            }
-        } else {
-            val letter = extractLetterForSpeech(uiState.predictionText)
+        if (suppressNextWordSpeak && uiState.displayStatus.equals("Ready for word", ignoreCase = true)) {
+            suppressNextWordSpeak = false
+        }
+    }
 
-            val shouldSpeak =
-                letter != null &&
-                        letter != lastSpokenText &&
-                        now - lastSpokenAt > 900L
+    // Auto speak only when the LETTER actually changes
+    LaunchedEffect(
+        uiState.predictionText,
+        uiState.isWordMode
+    ) {
+        if (uiState.isWordMode) return@LaunchedEffect
 
-            if (shouldSpeak) {
-                ttsManager.speak(letter)
-                lastSpokenText = letter
-                lastSpokenAt = now
-            }
+        val letter = extractLetterForSpeech(uiState.predictionText)
+        if (letter != null && letter != lastSpokenLetter) {
+            ttsManager.speak(letter)
+            lastSpokenLetter = letter
         }
     }
 
@@ -174,14 +178,12 @@ fun RecognitionRoute() {
         previewView = previewView,
         uiState = uiState,
         onSwitchMode = {
+            suppressNextWordSpeak = true
             engine.toggleMode()
-            lastSpokenText = ""
-            lastSpokenAt = 0L
         },
         onClearWord = {
+            suppressNextWordSpeak = true
             engine.clearWordState()
-            lastSpokenText = ""
-            lastSpokenAt = 0L
         },
         onSpeak = {
             if (uiState.isWordMode) {
@@ -192,15 +194,13 @@ fun RecognitionRoute() {
                     !word.equals("UNKNOWN", ignoreCase = true)
                 ) {
                     ttsManager.speak(word)
-                    lastSpokenText = word
-                    lastSpokenAt = SystemClock.elapsedRealtime()
+                    lastSpokenWord = word
                 }
             } else {
                 val letter = extractLetterForSpeech(uiState.predictionText)
                 if (letter != null) {
                     ttsManager.speak(letter)
-                    lastSpokenText = letter
-                    lastSpokenAt = SystemClock.elapsedRealtime()
+                    lastSpokenLetter = letter
                 }
             }
         }
@@ -550,22 +550,20 @@ private fun extractLetterForSpeech(predictionText: String): String? {
         clean.isBlank() ||
         clean == "-" ||
         clean.equals("Prediction: -", ignoreCase = true) ||
-        clean.contains("No hand", ignoreCase = true) ||
-        clean.contains("low confidence", ignoreCase = true)
+        clean.contains("low confidence", ignoreCase = true) ||
+        clean.contains("no hand", ignoreCase = true)
     ) return null
 
-    return when {
-        clean.startsWith("Letter:", ignoreCase = true) -> {
-            clean.removePrefix("Letter:")
-                .trim()
-                .substringBefore("(")
-                .substringBefore(" ")
-                .trim()
-                .takeIf { it.length == 1 && it[0].isLetter() }
-        }
-
-        clean.length == 1 && clean[0].isLetter() -> clean
-
-        else -> null
+    val afterColon = if (clean.contains(":")) {
+        clean.substringAfter(":").trim()
+    } else {
+        clean
     }
+
+    val token = afterColon
+        .substringBefore("(")
+        .substringBefore(" ")
+        .trim()
+
+    return token.takeIf { it.length == 1 && it[0].isLetter() }
 }
