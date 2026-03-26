@@ -103,4 +103,6 @@ dependencies {
 
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.material3:material3:1.2.0")
+
+    implementation("org.java-websocket:Java-WebSocket:1.5.3")
 }

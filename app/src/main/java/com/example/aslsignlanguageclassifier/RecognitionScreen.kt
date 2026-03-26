@@ -54,6 +54,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import android.os.SystemClock
 
+import com.example.aslsignlanguageclassifier.WebSocketSender
+
 @Composable
 fun AppEntry(hasCameraPermission: Boolean) {
     var selectedTab by rememberSaveable { mutableStateOf(0) }
@@ -115,7 +117,7 @@ fun RecognitionRoute() {
     val previewView = rememberPreviewView(context)
     val engine = remember { RecognitionEngine(context) }
     val ttsManager = remember { TextToSpeechManager(context) }
-
+    val wsSender = remember { WebSocketSender("192.168.1.125") }
     val uiState by engine.uiState.collectAsState()
 
     var lastSpokenWord by remember { mutableStateOf("") }
@@ -124,6 +126,9 @@ fun RecognitionRoute() {
 
     LaunchedEffect(engine, previewView, lifecycleOwner) {
         engine.start(previewView, lifecycleOwner)
+        wsSender.connect()
+        kotlinx.coroutines.delay(1500)
+        wsSender.send("HELLO")
     }
 
     // Auto speak only when a NEW completed word appears
@@ -145,6 +150,7 @@ fun RecognitionRoute() {
 
         if (shouldSpeak) {
             ttsManager.speak(word)
+            wsSender.send(word)
             lastSpokenWord = word
         }
 
@@ -163,6 +169,7 @@ fun RecognitionRoute() {
         val letter = extractLetterForSpeech(uiState.predictionText)
         if (letter != null && letter != lastSpokenLetter) {
             ttsManager.speak(letter)
+            wsSender.send(letter)
             lastSpokenLetter = letter
         }
     }
@@ -171,6 +178,7 @@ fun RecognitionRoute() {
         onDispose {
             engine.release()
             ttsManager.shutdown()
+            wsSender.close()
         }
     }
 
@@ -194,12 +202,14 @@ fun RecognitionRoute() {
                     !word.equals("UNKNOWN", ignoreCase = true)
                 ) {
                     ttsManager.speak(word)
+                    wsSender.send(word)
                     lastSpokenWord = word
                 }
             } else {
                 val letter = extractLetterForSpeech(uiState.predictionText)
                 if (letter != null) {
                     ttsManager.speak(letter)
+                    wsSender.send(letter)
                     lastSpokenLetter = letter
                 }
             }
