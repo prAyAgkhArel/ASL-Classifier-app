@@ -117,7 +117,7 @@ fun RecognitionRoute() {
     val previewView = rememberPreviewView(context)
     val engine = remember { RecognitionEngine(context) }
     val ttsManager = remember { TextToSpeechManager(context) }
-    val wsSender = remember { WebSocketSender("192.168.1.125") }
+    val wsSender = remember { WebSocketSender("192.168.1.79") }
     val uiState by engine.uiState.collectAsState()
 
     var lastSpokenWord by remember { mutableStateOf("") }
@@ -127,11 +127,10 @@ fun RecognitionRoute() {
     LaunchedEffect(engine, previewView, lifecycleOwner) {
         engine.start(previewView, lifecycleOwner)
         wsSender.connect()
-        kotlinx.coroutines.delay(1500)
-        wsSender.send("HELLO")
+        kotlinx.coroutines.delay(2000)
+        wsSender.send("TEXT:HELLO")
     }
 
-    // Auto speak only when a NEW completed word appears
     LaunchedEffect(
         uiState.lastPredictedWord,
         uiState.displayStatus,
@@ -150,7 +149,7 @@ fun RecognitionRoute() {
 
         if (shouldSpeak) {
             ttsManager.speak(word)
-            wsSender.send(word)
+            wsSender.send("TEXT:${word.uppercase()}")
             lastSpokenWord = word
         }
 
@@ -159,7 +158,6 @@ fun RecognitionRoute() {
         }
     }
 
-    // Auto speak only when the LETTER actually changes
     LaunchedEffect(
         uiState.predictionText,
         uiState.isWordMode
@@ -169,7 +167,7 @@ fun RecognitionRoute() {
         val letter = extractLetterForSpeech(uiState.predictionText)
         if (letter != null && letter != lastSpokenLetter) {
             ttsManager.speak(letter)
-            wsSender.send(letter)
+            wsSender.send("TEXT:${letter.uppercase()}")
             lastSpokenLetter = letter
         }
     }
@@ -202,14 +200,14 @@ fun RecognitionRoute() {
                     !word.equals("UNKNOWN", ignoreCase = true)
                 ) {
                     ttsManager.speak(word)
-                    wsSender.send(word)
+                    wsSender.send("TEXT:${word.uppercase()}")
                     lastSpokenWord = word
                 }
             } else {
                 val letter = extractLetterForSpeech(uiState.predictionText)
                 if (letter != null) {
                     ttsManager.speak(letter)
-                    wsSender.send(letter)
+                    wsSender.send("TEXT:${letter.uppercase()}")
                     lastSpokenLetter = letter
                 }
             }

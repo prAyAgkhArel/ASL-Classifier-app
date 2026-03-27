@@ -40,6 +40,9 @@ import kotlin.math.round
 import kotlin.math.sqrt
 
 private const val TAG = "ASL_APP"
+private const val LETTER_MIN_CONFIDENCE = 0.85f
+private const val LETTER_MIN_MARGIN = 0.15f
+private const val LETTER_STABLE_FRAMES = 3
 
 class RecognitionEngine(
     private val context: Context
@@ -301,11 +304,17 @@ class RecognitionEngine(
         }
     }
 
+    private var lastLetterCandidate = ""
+    private var stableLetterFrames = 0
+
     private fun handleLetterMode(handResult: HandLandmarkerResult) {
         if (handResult.landmarks().isEmpty() ||
             handResult.handednesses().isEmpty() ||
             handResult.handednesses()[0].isEmpty()
         ) {
+            lastLetterCandidate = ""
+            stableLetterFrames = 0
+
             updateUi {
                 if (it.displayStatus == "No hand" && it.predictionText == "-") {
                     it
@@ -333,10 +342,39 @@ class RecognitionEngine(
         interpreter.run(inputBuffer, letterOutput)
 
         val scores = letterOutput[0]
-        val bestIdx = argMax(scores)
-        val conf = scores[bestIdx]
+        val ranked = scores.indices.sortedByDescending { scores[it] }
 
-        val prediction = "Letter top: ${labels[bestIdx]} (${String.format("%.4f", conf)})"
+        val bestIdx = ranked[0]
+        val secondIdx = if (ranked.size > 1) ranked[1] else ranked[0]
+
+        val bestLabel = labels[bestIdx]
+        val conf = scores[bestIdx]
+        val secondConf = scores[secondIdx]
+        val margin = conf - secondConf
+
+        val accepted =
+            conf >= LETTER_MIN_CONFIDENCE &&
+                    margin >= LETTER_MIN_MARGIN
+
+        if (accepted) {
+            if (bestLabel == lastLetterCandidate) {
+                stableLetterFrames++
+            } else {
+                lastLetterCandidate = bestLabel
+                stableLetterFrames = 1
+            }
+        } else {
+            lastLetterCandidate = ""
+            stableLetterFrames = 0
+        }
+
+        val prediction = when {
+            !accepted -> "Low confidence"
+            stableLetterFrames < LETTER_STABLE_FRAMES ->
+                "Stabilizing: $bestLabel (${String.format("%.2f", conf)})"
+            else ->
+                "Letter top: $bestLabel (${String.format("%.4f", conf)})"
+        }
 
         updateUi {
             it.copy(

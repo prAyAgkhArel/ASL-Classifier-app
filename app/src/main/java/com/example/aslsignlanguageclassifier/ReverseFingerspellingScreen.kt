@@ -39,6 +39,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 
 @Composable
 fun ReverseFingerspellingScreen() {
@@ -46,6 +49,27 @@ fun ReverseFingerspellingScreen() {
     var mode by rememberSaveable { mutableStateOf(1) }
 
     val letters = inputText.uppercase().filter { it.isLetter() }.toList()
+    val wsSender = remember { WebSocketSender("192.168.1.79") }
+
+    LaunchedEffect(Unit) {
+        wsSender.connect()
+        kotlinx.coroutines.delay(2000)
+        wsSender.send("SIGN:CAT")
+    }
+
+    LaunchedEffect(inputText) {
+        kotlinx.coroutines.delay(500)
+        val cleaned = inputText.uppercase().trim()
+        if (cleaned.isNotBlank()) {
+            wsSender.send("SIGN:$cleaned")
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            wsSender.close()
+        }
+    }
 
     Column(
         modifier = Modifier

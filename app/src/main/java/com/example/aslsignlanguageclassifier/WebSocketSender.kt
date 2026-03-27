@@ -11,10 +11,11 @@ class WebSocketSender(
     @Volatile
     private var connected = false
 
-    private val client = object : WebSocketClient(URI("ws://$esp32Ip/ws")) {
+    private val client: WebSocketClient = object : WebSocketClient(URI("ws://$esp32Ip/ws")) {
         override fun onOpen(handshakedata: ServerHandshake?) {
             connected = true
             Log.d("WebSocketSender", "WebSocket connected")
+            send("TEXT:CONNECTED")
         }
 
         override fun onMessage(message: String?) {
@@ -40,14 +41,9 @@ class WebSocketSender(
 
     fun send(text: String) {
         val clean = text.trim()
+        Log.d("WebSocketSender", "Trying to send: $clean, connected=$connected, open=${client.isOpen}")
         if (clean.isNotBlank() && connected && client.isOpen) {
-            Log.d("WebSocketSender", "Sending: $clean")
             client.send(clean)
-        } else {
-            Log.d(
-                "WebSocketSender",
-                "Not sent. connected=$connected, open=${client.isOpen}, text='$clean'"
-            )
         }
     }
 
