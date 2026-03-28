@@ -56,6 +56,10 @@ import android.os.SystemClock
 
 import com.example.aslsignlanguageclassifier.WebSocketSender
 
+object AppConfig {
+    var esp32IP = "192.168.1.100"
+}
+
 @Composable
 fun AppEntry(hasCameraPermission: Boolean) {
     var selectedTab by rememberSaveable { mutableStateOf(0) }
@@ -117,7 +121,7 @@ fun RecognitionRoute() {
     val previewView = rememberPreviewView(context)
     val engine = remember { RecognitionEngine(context) }
     val ttsManager = remember { TextToSpeechManager(context) }
-    val wsSender = remember { WebSocketSender("192.168.1.79") }
+    val wsSender = remember { WebSocketSender(AppConfig.esp32IP) }
     val uiState by engine.uiState.collectAsState()
 
     var lastSpokenWord by remember { mutableStateOf("") }

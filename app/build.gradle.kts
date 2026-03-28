@@ -105,4 +105,7 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.2.0")
 
     implementation("org.java-websocket:Java-WebSocket:1.5.3")
+    implementation("androidx.media3:media3-exoplayer:1.9.3")
+    implementation("androidx.media3:media3-ui:1.9.3")
+    implementation("androidx.media3:media3-common:1.9.3")
 }
